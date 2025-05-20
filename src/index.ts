@@ -122,10 +122,15 @@ const searchBestMove = async (depth: number, maxTimeMs: number) => {
 
     clearTimeout(timer)
 
+    console.log(bestMoves.slice(0, 4))
+
     if (bestMoves.length > 0) {
         console.log(`bestmove ${bestMoves[0].move}`)
     } else {
-        console.log('bestmove 0000')
+        const moves = chess.moves({ verbose: true })
+        const move = moves[Math.floor(Math.random() * moves.length)]
+
+        console.log(`bestmove ${move.from + move.to + (move.promotion || '')}`)
     }
 }
 
@@ -142,7 +147,7 @@ const getBestMove = async (
     let setAlpha = -Infinity
     let setBeta = Infinity
 
-    let bestScore = -Infinity
+    let bestScore = chess.turn() === 'w' ? -Infinity : Infinity
 
     //미니맥스를 돌리기 위한 for문; 모든 판에 대해 미니맥스를 실행해 점수 출력
     for (let move of legalMoves) {
@@ -163,9 +168,13 @@ const getBestMove = async (
 
         let score = minimaxoutput.score
 
-        bestScore = Math.max(bestScore, score)
-
-        setAlpha = Math.max(score, setAlpha)
+        if (chess.turn() === 'w') {
+            bestScore = Math.max(bestScore, score)
+            setAlpha = Math.max(score, setAlpha)
+        } else {
+            bestScore = Math.min(bestScore, score)
+            setBeta = Math.min(score, setBeta)
+        }
 
         let scoreobj = {
             move: uciMove,
@@ -175,12 +184,18 @@ const getBestMove = async (
         scoreWithMove.push(scoreobj)
 
         if (setAlpha >= setBeta) {
-            scoreWithMove.sort((a, b) => b.score - a.score)
+            if (chess.turn() === 'w')
+                scoreWithMove = scoreWithMove.sort((a, b) => b.score - a.score)
+            else scoreWithMove = scoreWithMove.sort((a, b) => a.score - b.score)
+
             return scoreWithMove
         }
     }
 
-    scoreWithMove.sort((a, b) => b.score - a.score)
+    if (chess.turn() === 'w')
+        scoreWithMove = scoreWithMove.sort((a, b) => b.score - a.score)
+    else scoreWithMove = scoreWithMove.sort((a, b) => a.score - b.score)
+
     return scoreWithMove //일단 어디로 갈지 정제되지 않은 다음 모든 위치와 그에 따른 점수가 담긴 배열을 출력
 }
 
@@ -307,20 +322,26 @@ const minimax = async (
     }
 }
 
-const evaluateBoard = (chess: Chess) => {
+export const evaluateBoard = (chess: Chess) => {
+    let whiteMovableCount = 0
+    let blackMovableCount = 0
+
+    if (chess.turn() === 'w') {
+        whiteMovableCount = chess.moves().length
+        blackMovableCount = new Chess(flipActiveColor(chess.fen())).moves()
+            .length
+    } else {
+        blackMovableCount = chess.moves().length
+        whiteMovableCount = new Chess(flipActiveColor(chess.fen())).moves()
+            .length
+    }
+
     let score = 0
     let gameruleScore = 0
-    let mobilityScore =
-        new Chess(flipActiveColor(chess.fen())).moves().length +
-        chess.moves().length
+    let mobilityScore = whiteMovableCount - blackMovableCount
 
-    if (chess.isCheck() && chess.turn() === 'b') {
-        //우리팀이 체크일때때
-        gameruleScore += -30
-    }
-    if (chess.isCheck() && chess.turn() === 'w') {
-        //적이 체크일 때
-        gameruleScore += 40
+    if (chess.isCheck()) {
+        gameruleScore += chess.turn() === 'b' ? 30 : -30
     }
     if (chess.isStalemate()) {
         //현재가 스테일메이트일 때
@@ -358,10 +379,7 @@ const evaluateBoard = (chess: Chess) => {
     //         score += team == piece.team ? finalScore : -finalScore //팀에 따라 부호 변경
     //     }
     // }
-    return (
-        (chess.turn() === 'w' ? 1 : -1) *
-        (score + gameruleScore + mobilityScore * 0.1)
-    )
+    return score + gameruleScore + mobilityScore * 0.1
 }
 
 const flipActiveColor = (fen: string) => {
@@ -387,8 +405,6 @@ const getPieceScore = (piece: Piece) => {
         case 'q':
             return 9
         case 'k':
-            return 0
-        default:
             return 0
     }
 }
