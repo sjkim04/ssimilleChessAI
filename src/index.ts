@@ -8,7 +8,7 @@ const rl = readline.createInterface({
     terminal: false
 })
 
-console.log('id name SsimilleChessAI 0.1.0')
+console.log('id name Cimille 0.1.0')
 console.log('id author Ssimille, Phrygia')
 console.log('uciok')
 
