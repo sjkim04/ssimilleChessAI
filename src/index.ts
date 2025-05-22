@@ -14,7 +14,7 @@ let isStopped = false
 rl.on('line', (line) => {
     line = line.trim()
     if (line === 'uci') {
-        console.log('id name SsimilleChessAI 0.1.0')
+        console.log('id name Cimille 0.1.0')
         console.log('id author Ssimille, Phrygia')
         console.log('uciok')
     } else if (line === 'isready') {
@@ -26,10 +26,10 @@ rl.on('line', (line) => {
         const options = line.split(' ').slice(1)
         if (options[0] === 'fen') {
             const fen = options.slice(1, 7).join(' ')
-            chess = new Chess(fen)
+            chess.load(fen)
             options.splice(0, 7)
         } else if (options[0] === 'startpos') {
-            chess = new Chess()
+            chess.reset()
             options.splice(0, 1)
         }
 
@@ -99,7 +99,7 @@ rl.on('line', (line) => {
     } else if (line === 'stop') {
         isStopped = true
     } else if (line === 'ucinewgame') {
-        chess = new Chess()
+        chess.reset()
         isStopped = false
     } else if (line === 'quit') {
         process.exit(0)
@@ -118,7 +118,12 @@ const searchBestMove = async (depth: number, maxTimeMs: number) => {
 
     clearTimeout(timer)
 
-    console.log(`info bestmoves ${bestMoves.slice(0, 4).map(m=>`${m.move} ${Math.round(m.score * 100) / 100}`).join(' ')}`)
+    console.log(
+        `info bestmoves ${bestMoves
+            .slice(0, 4)
+            .map((m) => `${m.move} ${Math.round(m.score * 100) / 100}`)
+            .join(' ')}`
+    )
 
     if (bestMoves.length > 0) {
         console.log(`bestmove ${bestMoves[0].move}`)
@@ -351,7 +356,7 @@ export const evaluateBoard = (chess: Chess) => {
     const board = chess.board()
     for (let col = 0; col < 8; col++) {
         for (let row = 0; row < 8; row++) {
-            const piece = board[col][row]
+            const piece = board[row][col]
             if (!piece) continue
 
             let pieceScore = getPieceScore(piece)
