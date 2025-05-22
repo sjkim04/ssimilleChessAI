@@ -8,10 +8,6 @@ const rl = readline.createInterface({
     terminal: false
 })
 
-console.log('id name Cimille 0.1.0')
-console.log('id author Ssimille, Phrygia')
-console.log('uciok')
-
 let chess = new Chess()
 let isStopped = false
 
@@ -122,7 +118,7 @@ const searchBestMove = async (depth: number, maxTimeMs: number) => {
 
     clearTimeout(timer)
 
-    console.log(bestMoves.slice(0, 4))
+    console.log(`info bestmoves ${bestMoves.slice(0, 4).map(m=>`${m.move} ${Math.round(m.score * 100) / 100}`).join(' ')}`)
 
     if (bestMoves.length > 0) {
         console.log(`bestmove ${bestMoves[0].move}`)
