@@ -1,6 +1,5 @@
 import readline from 'readline'
-import 'chess.js'
-import { Chess, Piece } from 'chess.js'
+import { Chess, Move, Piece } from 'chess.js'
 
 const rl = readline.createInterface({
     input: process.stdin,
@@ -10,6 +9,7 @@ const rl = readline.createInterface({
 
 let chess = new Chess()
 let isStopped = false
+let bestMoveOverall: { move: string; score: number } | null = null
 
 rl.on('line', (line) => {
     line = line.trim()
@@ -20,9 +20,6 @@ rl.on('line', (line) => {
     } else if (line === 'isready') {
         console.log('readyok')
     } else if (line.startsWith('position')) {
-        // Handle position command
-        // Example: position startpos moves e2e4 e7e5
-        // TODO: parse and update your internal board representation here
         const options = line.split(' ').slice(1)
         if (options[0] === 'fen') {
             const fen = options.slice(1, 7).join(' ')
@@ -39,7 +36,7 @@ rl.on('line', (line) => {
         }
     } else if (line.startsWith('go')) {
         const tokens = line.split(' ')
-        let depth = 3 // default depth
+        let depth = Infinity // Default to infinite depth for iterative deepening
 
         let wtime = null
         let btime = null
@@ -81,18 +78,17 @@ rl.on('line', (line) => {
             }
         }
 
-        // If movetime is not specified, calculate a safe time budget based on remaining time and increments
+        // If movetime is not specified, calculate a safe time budget
         if (!movetime) {
-            // Determine whose turn it is to move
-            if (chess.turn() === 'w' && wtime > 0) {
-                // Use 30% of remaining time plus increment
-                movetime = Math.floor(wtime * 0.3) + winc
-            } else if (chess.turn() === 'b' && btime > 0) {
-                movetime = Math.floor(btime * 0.3) + binc
+            if (chess.turn() === 'w' && wtime !== null) {
+                movetime = Math.floor(wtime / movestogo) + winc // Simple strategy
+            } else if (chess.turn() === 'b' && btime !== null) {
+                movetime = Math.floor(btime / movestogo) + binc // Simple strategy
             } else {
-                // default to 1 second if no info available
-                movetime = 1000
+                movetime = 1000 // default to 1 second if no info available
             }
+            // Ensure a minimum time if calculated time is too low
+            movetime = Math.max(movetime, 50)
         }
 
         searchBestMove(depth, movetime)
@@ -101,37 +97,69 @@ rl.on('line', (line) => {
     } else if (line === 'ucinewgame') {
         chess.reset()
         isStopped = false
+        bestMoveOverall = null
     } else if (line === 'quit') {
         process.exit(0)
     }
 })
 
-const searchBestMove = async (depth: number, maxTimeMs: number) => {
+const searchBestMove = async (maxDepth: number, maxTimeMs: number) => {
     isStopped = false
+    bestMoveOverall = null
     const startTime = Date.now()
 
-    const timer = setTimeout(() => {
-        isStopped = true
-    }, maxTimeMs)
+    // Iterative deepening loop
+    for (let currentDepth = 1; currentDepth <= maxDepth; currentDepth++) {
+        if (isStopped || Date.now() - startTime > maxTimeMs) {
+            console.log(
+                'info string search stopped early due to time or stop command'
+            )
+            break // Exit the loop if stopped or time limit exceeded
+        }
 
-    let bestMoves = await getBestMove(chess, depth, startTime, maxTimeMs)
+        // Pass startTime and maxTimeMs to minimax for accurate time checks
+        let currentDepthBestMoves = await getBestMove(
+            chess,
+            currentDepth,
+            startTime,
+            maxTimeMs
+        )
 
-    clearTimeout(timer)
+        if (isStopped || Date.now() - startTime > maxTimeMs) {
+            console.log(
+                'info string search stopped mid-depth due to time or stop command'
+            )
+            break // Exit if stopped during the current depth search
+        }
 
-    console.log(
-        `info bestmoves ${bestMoves
-            .slice(0, 4)
-            .map((m) => `${m.move} ${Math.round(m.score * 100) / 100}`)
-            .join(' ')}`
-    )
+        if (currentDepthBestMoves.length > 0) {
+            bestMoveOverall = currentDepthBestMoves[0] // Always store the best move from the *current* completed depth
+            console.log(
+                `info depth ${currentDepth} score cp ${Math.round(
+                    bestMoveOverall.score * 100
+                )} nodes ${0} nps ${0} time ${Date.now() - startTime} pv ${
+                    bestMoveOverall.move
+                }`
+            )
+        } else {
+            // No moves found at this depth (e.g., checkmate/stalemate at depth 0)
+            break
+        }
+    }
 
-    if (bestMoves.length > 0) {
-        console.log(`bestmove ${bestMoves[0].move}`)
+    if (bestMoveOverall) {
+        console.log(`bestmove ${bestMoveOverall.move}`)
     } else {
+        // Fallback if no moves could be found (e.g., immediate checkmate/stalemate)
         const moves = chess.moves({ verbose: true })
-        const move = moves[Math.floor(Math.random() * moves.length)]
-
-        console.log(`bestmove ${move.from + move.to + (move.promotion || '')}`)
+        if (moves.length > 0) {
+            const move = moves[Math.floor(Math.random() * moves.length)]
+            console.log(
+                `bestmove ${move.from + move.to + (move.promotion || '')}`
+            )
+        } else {
+            console.log('info string no legal moves found, game over')
+        }
     }
 }
 
@@ -142,37 +170,48 @@ const getBestMove = async (
     maxTimeMs: number
 ) => {
     let legalMoves = chess.moves({ verbose: true })
+    if (legalMoves.length === 0) {
+        return [] // No legal moves, return empty
+    }
 
-    let scoreWithMove = [] //이 안에는 어디있던 말이 어디로 이동했고 그때 총 점수가 몇인지가 담긴 오브젝트 여러개가 배열로 존재한다
+    let scoreWithMove: { move: string; score: number }[] = []
 
     let setAlpha = -Infinity
     let setBeta = Infinity
 
-    let bestScore = chess.turn() === 'w' ? -Infinity : Infinity
+    // Sort moves for better alpha-beta pruning (e.g., prioritize captures, checks)
+    legalMoves = legalMoves.sort(
+        (a, b) => getMoveOrderScore(chess, b) - getMoveOrderScore(chess, a)
+    )
 
-    //미니맥스를 돌리기 위한 for문; 모든 판에 대해 미니맥스를 실행해 점수 출력
     for (let move of legalMoves) {
+        // Check for stop condition before each new branch of the search tree
         if (isStopped || Date.now() - startTime > maxTimeMs) {
-            console.log('info string search stopped early')
-            break
+            return scoreWithMove // Return moves found so far if stopped
         }
 
+        // Yield control to event loop to prevent blocking, especially for deep searches
         await new Promise((resolve) => setImmediate(resolve))
 
         const uciMove = move.from + move.to + (move.promotion || '')
         chess.move(uciMove)
 
-        let minimaxoutput = await minimax(chess, depth, setAlpha, setBeta) //입력받은 가상 SimulateGame 클래스를 통해 미니맥스를 진행하여 점수를 뽑는다.
-
+        // Pass startTime and maxTimeMs to minimax
+        let minimaxoutput = await minimax(
+            chess,
+            depth - 1,
+            setAlpha,
+            setBeta,
+            startTime,
+            maxTimeMs
+        )
         chess.undo()
 
         let score = minimaxoutput.score
 
         if (chess.turn() === 'w') {
-            bestScore = Math.max(bestScore, score)
             setAlpha = Math.max(score, setAlpha)
         } else {
-            bestScore = Math.min(bestScore, score)
             setBeta = Math.min(score, setBeta)
         }
 
@@ -180,23 +219,19 @@ const getBestMove = async (
             move: uciMove,
             score
         }
-
         scoreWithMove.push(scoreobj)
 
         if (setAlpha >= setBeta) {
-            if (chess.turn() === 'w')
-                scoreWithMove = scoreWithMove.sort((a, b) => b.score - a.score)
-            else scoreWithMove = scoreWithMove.sort((a, b) => a.score - b.score)
-
-            return scoreWithMove
+            // Alpha-beta cutoff
+            break // Stop searching further moves at this level
         }
     }
 
-    if (chess.turn() === 'w')
-        scoreWithMove = scoreWithMove.sort((a, b) => b.score - a.score)
-    else scoreWithMove = scoreWithMove.sort((a, b) => a.score - b.score)
+    // Sort the moves based on score
+    if (chess.turn() === 'w') scoreWithMove.sort((a, b) => b.score - a.score)
+    else scoreWithMove.sort((a, b) => a.score - b.score)
 
-    return scoreWithMove //일단 어디로 갈지 정제되지 않은 다음 모든 위치와 그에 따른 점수가 담긴 배열을 출력
+    return scoreWithMove
 }
 
 const minimax = async (
@@ -204,10 +239,11 @@ const minimax = async (
     depth: number,
     alpha = -Infinity,
     beta = Infinity,
-    startTime?: number,
-    maxTimeMs?: number
+    startTime: number, // Pass startTime to minimax
+    maxTimeMs: number // Pass maxTimeMs to minimax
 ) => {
-    if (isStopped) {
+    if (isStopped || Date.now() - startTime > maxTimeMs) {
+        // If stopped or time limit exceeded, return the current evaluation
         return { score: evaluateBoard(chess), alpha, beta }
     }
 
@@ -220,90 +256,49 @@ const minimax = async (
             beta: beta
         }
     } else {
-        //깊이가 0이 아니라면
         let setAlpha = alpha
         let setBeta = beta
 
-        //자기 차례면 최대를 구하기 위해 -무한에서, 적 차례면 최소를 구하기 위해 무한에서
         let bestScore = chess.turn() === 'w' ? -Infinity : Infinity
 
-        let legalMoves = chess.moves()
+        let legalMoves = chess.moves({ verbose: true })
+        legalMoves = legalMoves.sort(
+            (a, b) => getMoveOrderScore(chess, b) - getMoveOrderScore(chess, a)
+        )
 
-        if (chess.turn() === 'w') {
-            for (let move of legalMoves) {
-                if (
-                    isStopped ||
-                    (startTime &&
-                        maxTimeMs &&
-                        Date.now() - startTime > maxTimeMs)
-                ) {
-                    return {
-                        score: evaluateBoard(chess),
-                        alpha: alpha,
-                        beta: beta
-                    }
-                }
-
-                chess.move(move) //그 위치로 이동한 가상 체스판
-
-                let minimaxoutput = await minimax(
-                    chess,
-                    depth - 1,
-                    setAlpha,
-                    setBeta
-                ) //입력받은 가상 SimulateGame 클래스를 통해 미니맥스를 진행하여 점수를 뽑는다.
-                chess.undo()
-
-                let score = minimaxoutput.score
-
-                bestScore = Math.max(bestScore, score)
-
-                setAlpha = Math.max(score, setAlpha)
-
-                if (setAlpha >= setBeta) {
-                    return {
-                        score: bestScore,
-                        alpha: setAlpha,
-                        beta: setBeta
-                    }
+        for (let move of legalMoves) {
+            if (isStopped || Date.now() - startTime > maxTimeMs) {
+                return {
+                    score: evaluateBoard(chess),
+                    alpha: setAlpha,
+                    beta: setBeta
                 }
             }
-        } else if (chess.turn() === 'b') {
-            //현재가 적의 턴이면
-            //다음 턴에선 아군 => 낸 수 중에서 점수가 최악인 걸 골라내야함 (그래야 나에게 안좋음)
-            for (let move of legalMoves) {
-                if (
-                    isStopped ||
-                    (startTime &&
-                        maxTimeMs &&
-                        Date.now() - startTime > maxTimeMs)
-                ) {
-                    return { score: evaluateBoard(chess), alpha, beta }
-                }
 
-                chess.move(move)
+            chess.move(move)
 
-                let minimaxoutput = await minimax(
-                    chess,
-                    depth - 1,
-                    setAlpha,
-                    setBeta
-                ) //입력받은 가상 SimulateGame 클래스를 통해 미니맥스를 진행하여 점수를 뽑는다.
-                chess.undo()
+            let minimaxoutput = await minimax(
+                chess,
+                depth - 1,
+                setAlpha,
+                setBeta,
+                startTime,
+                maxTimeMs // Pass them down the recursion
+            )
+            chess.undo()
 
-                let score = minimaxoutput.score
+            let score = minimaxoutput.score
 
+            if (chess.turn() === 'w') {
+                bestScore = Math.max(bestScore, score)
+                setAlpha = Math.max(score, setAlpha)
+            } else {
                 bestScore = Math.min(bestScore, score)
-
                 setBeta = Math.min(score, setBeta)
+            }
 
-                if (setAlpha >= setBeta) {
-                    return {
-                        score: bestScore,
-                        alpha: setAlpha,
-                        beta: setBeta
-                    }
-                }
+            if (setAlpha >= setBeta) {
+                break // Alpha-beta cutoff
             }
         }
 
@@ -331,11 +326,9 @@ export const evaluateBoard = (chess: Chess) => {
         gameruleScore += chess.turn() === 'b' ? 30 : -30
     }
     if (chess.isStalemate()) {
-        //현재가 스테일메이트일 때
         gameruleScore += -500
     }
     if (chess.isCheckmate()) {
-        //현재 턴인 팀이 체크메이트일 때
         return (chess.turn() === 'b' ? 1 : -1) * Infinity
     }
 
@@ -353,19 +346,6 @@ export const evaluateBoard = (chess: Chess) => {
             score += piece.color === 'w' ? finalScore : -finalScore
         }
     }
-    // for (let col = 0; col < 8; col++) {
-    //     for (let row = 0; row < 8; row++) {
-    //         const piece = board[col][row]
-    //         if (!piece) continue
-
-    //         let pieceScore = piece.score //기물 자체 점수
-    //         let pstScore = getPieceSquareValue(piece, col, row) / 10 //기물의 위치 가중치
-
-    //         let finalScore = pieceScore + pstScore
-
-    //         score += team == piece.team ? finalScore : -finalScore //팀에 따라 부호 변경
-    //     }
-    // }
     return score + gameruleScore + mobilityScore * 0.1
 }
 
@@ -467,4 +447,34 @@ const PST = {
         [2, 2, 0, 0, 0, 0, 2, 2],
         [2, 3, 1, 0, 0, 1, 3, 2]
     ]
+}
+
+const getCaptureScore = (move: Move): number => {
+    // colors are placeholder
+    const victimScore = getPieceScore({ type: move.captured, color: 'w' }) || 0
+    const attackerScore = getPieceScore({ type: move.piece, color: 'w' }) || 0
+    return victimScore * 10 - attackerScore
+}
+
+const getMoveOrderScore = (chess: Chess, move: Move): number => {
+    let score = 0
+
+    // Prioritize captures using MVV-LVA (Most Valuable Victim - Least Valuable Attacker)
+    if (move.captured) {
+        score += getCaptureScore(move) + 1000
+    }
+
+    // Prioritize checks
+    const test = new Chess(chess.fen())
+    test.move(move)
+    if (test.inCheck()) {
+        score += 500
+    }
+
+    // Promote moves get a bonus
+    if (move.promotion) {
+        score += 300
+    }
+
+    return score
 }
