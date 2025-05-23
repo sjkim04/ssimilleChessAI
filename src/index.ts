@@ -159,13 +159,12 @@ const getBestMove = async (
 
         await new Promise((resolve) => setImmediate(resolve))
 
-        //이동배열에 담긴 각각의 이동 위치
-        let clonedChess = new Chess(chess.fen())
-
         const uciMove = move.from + move.to + (move.promotion || '')
-        clonedChess.move(uciMove)
+        chess.move(uciMove)
 
-        let minimaxoutput = await minimax(clonedChess, depth, setAlpha, setBeta) //입력받은 가상 SimulateGame 클래스를 통해 미니맥스를 진행하여 점수를 뽑는다.
+        let minimaxoutput = await minimax(chess, depth, setAlpha, setBeta) //입력받은 가상 SimulateGame 클래스를 통해 미니맥스를 진행하여 점수를 뽑는다.
+
+        chess.undo()
 
         let score = minimaxoutput.score
 
@@ -208,9 +207,6 @@ const minimax = async (
     startTime?: number,
     maxTimeMs?: number
 ) => {
-    //console.log(this.board)
-    // aaa++
-
     if (isStopped) {
         return { score: evaluateBoard(chess), alpha, beta }
     }
@@ -232,12 +228,8 @@ const minimax = async (
         let bestScore = chess.turn() === 'w' ? -Infinity : Infinity
 
         let legalMoves = chess.moves()
-        //각 말과 그 말의 이동가능위치를 담은 배열 제작
 
-        //console.log(movablePositionsWithPieces)
         if (chess.turn() === 'w') {
-            //현재가 자기 턴이면
-            //다음 턴에선 적군 => 낸 수 중에서 점수가 최대인 걸 골라내야함 (그래야 적에게 안좋음)
             for (let move of legalMoves) {
                 if (
                     isStopped ||
@@ -252,15 +244,15 @@ const minimax = async (
                     }
                 }
 
-                let nextGame = new Chess(chess.fen())
-                nextGame.move(move) //그 위치로 이동한 가상 체스판
+                chess.move(move) //그 위치로 이동한 가상 체스판
 
                 let minimaxoutput = await minimax(
-                    nextGame,
+                    chess,
                     depth - 1,
                     setAlpha,
                     setBeta
                 ) //입력받은 가상 SimulateGame 클래스를 통해 미니맥스를 진행하여 점수를 뽑는다.
+                chess.undo()
 
                 let score = minimaxoutput.score
 
@@ -289,15 +281,15 @@ const minimax = async (
                     return { score: evaluateBoard(chess), alpha, beta }
                 }
 
-                let nextGame = new Chess(chess.fen())
-                nextGame.move(move) //그 위치로 이동한 가상 체스판
+                chess.move(move)
 
                 let minimaxoutput = await minimax(
-                    nextGame,
+                    chess,
                     depth - 1,
                     setAlpha,
                     setBeta
                 ) //입력받은 가상 SimulateGame 클래스를 통해 미니맥스를 진행하여 점수를 뽑는다.
+                chess.undo()
 
                 let score = minimaxoutput.score
 
@@ -324,18 +316,12 @@ const minimax = async (
 }
 
 export const evaluateBoard = (chess: Chess) => {
-    let whiteMovableCount = 0
-    let blackMovableCount = 0
+    const currentMoves = chess.moves().length
+    const flipped = new Chess(flipActiveColor(chess.fen()))
+    const opponentMoves = flipped.moves().length
 
-    if (chess.turn() === 'w') {
-        whiteMovableCount = chess.moves().length
-        blackMovableCount = new Chess(flipActiveColor(chess.fen())).moves()
-            .length
-    } else {
-        blackMovableCount = chess.moves().length
-        whiteMovableCount = new Chess(flipActiveColor(chess.fen())).moves()
-            .length
-    }
+    let whiteMovableCount = chess.turn() === 'w' ? currentMoves : opponentMoves
+    let blackMovableCount = chess.turn() === 'b' ? currentMoves : opponentMoves
 
     let score = 0
     let gameruleScore = 0
