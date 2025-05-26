@@ -7,9 +7,13 @@ const rl = readline.createInterface({
     terminal: false
 })
 
+const CHECKMATE_SCORE = 30000
+
 let chess = new Chess()
 let isStopped = false
 let bestMoveOverall: { move: string; score: number } | null = null
+
+let nodesSearched = 0
 
 rl.on('line', (line) => {
     line = line.trim()
@@ -42,7 +46,7 @@ rl.on('line', (line) => {
         let btime = null
         let winc = 0
         let binc = 0
-        let movestogo = 30
+        let movestogo = null
         let movetime = null
 
         for (let i = 1; i < tokens.length; i++) {
@@ -78,17 +82,38 @@ rl.on('line', (line) => {
             }
         }
 
-        // If movetime is not specified, calculate a safe time budget
+        const TIME_FRACTION_DIVISOR = 25 // Roughly 1/25th to 1/40th of total moves (adjust based on game length)
+        const MIN_TIME_PER_MOVE_MS = 50 // Minimum time to search (50ms)
+        const MAX_TIME_PER_MOVE_MS_BLITZ = 5000 // Max 5 seconds for a blitz move
+        const MAX_TIME_PER_MOVE_MS_RAPID = 30000 // Max 30 seconds for a rapid move (adjust for slower games)
+
         if (!movetime) {
-            if (chess.turn() === 'w' && wtime !== null) {
-                movetime = Math.floor(wtime / movestogo) + winc // Simple strategy
-            } else if (chess.turn() === 'b' && btime !== null) {
-                movetime = Math.floor(btime / movestogo) + binc // Simple strategy
+            let myTime = chess.turn() === 'w' ? wtime : btime
+            let myInc = chess.turn() === 'w' ? winc : binc
+            if (myTime !== null && myTime > 0) {
+                if (movestogo !== null && movestogo > 0) {
+                    // If movestogo is provided, use that for a more accurate fixed-move strategy
+                    movetime = Math.floor(myTime / movestogo) + (myInc || 0)
+                    // Add a small buffer to ensure time for sending the move
+                    movetime -= 20
+                } else {
+                    // Otherwise, use a fraction of remaining time
+                    movetime =
+                        Math.floor(myTime / TIME_FRACTION_DIVISOR) +
+                        (myInc || 0)
+
+                    // Apply a hard cap to prevent excessively long searches for single moves
+                    // You might make this dynamic based on 'myTime' (e.g., if myTime > 100000ms, use MAX_TIME_PER_MOVE_RAPID)
+                    movetime = Math.min(movetime, MAX_TIME_PER_MOVE_MS_BLITZ)
+
+                    // Add a small buffer for outputting the move
+                    movetime -= 50 // Give a bit more buffer to be safe
+                }
             } else {
-                movetime = 1000 // default to 1 second if no info available
+                // Fallback if no time info at all (e.g., 'go infinite' or just 'go')
+                movetime = 1000 // Default to 1 second
+                if (depth === Infinity) depth = 6 // Cap depth if no time limit for safety
             }
-            // Ensure a minimum time if calculated time is too low
-            movetime = Math.max(movetime, 50)
         }
 
         searchBestMove(depth, movetime)
@@ -106,18 +131,42 @@ rl.on('line', (line) => {
 const searchBestMove = async (maxDepth: number, maxTimeMs: number) => {
     isStopped = false
     bestMoveOverall = null
+    nodesSearched = 0
     const startTime = Date.now()
 
-    // Iterative deepening loop
     for (let currentDepth = 1; currentDepth <= maxDepth; currentDepth++) {
-        if (isStopped || Date.now() - startTime > maxTimeMs) {
+        const timeElapsed = Date.now() - startTime
+        const timeLeft = maxTimeMs - timeElapsed
+
+        if (timeLeft <= 0) {
             console.log(
-                'info string search stopped early due to time or stop command'
+                `info string search stopped: time expired (before depth ${currentDepth})`
             )
-            break // Exit the loop if stopped or time limit exceeded
+            break
+        }
+        if (isStopped) {
+            console.log(
+                `info string search stopped: received stop command (before depth ${currentDepth})`
+            )
+            break
         }
 
-        // Pass startTime and maxTimeMs to minimax for accurate time checks
+        if (
+            bestMoveOverall &&
+            Math.abs(bestMoveOverall.score) >=
+                CHECKMATE_SCORE - (currentDepth + 1)
+        ) {
+            console.log('info string stopping search early: forced mate found')
+            break
+        }
+        const MIN_TIME_FOR_NEXT_DEPTH = 50
+        if (currentDepth > 1 && timeLeft < MIN_TIME_FOR_NEXT_DEPTH) {
+            console.log(
+                `info string stopping search early: time critical, not enough for depth ${currentDepth}`
+            )
+            break
+        }
+
         let currentDepthBestMoves = await getBestMove(
             chess,
             currentDepth,
@@ -125,24 +174,79 @@ const searchBestMove = async (maxDepth: number, maxTimeMs: number) => {
             maxTimeMs
         )
 
-        if (isStopped || Date.now() - startTime > maxTimeMs) {
+        if (
+            isStopped ||
+            (Date.now() - startTime > maxTimeMs && maxTimeMs !== Infinity)
+        ) {
             console.log(
-                'info string search stopped mid-depth due to time or stop command'
+                'info string search stopped mid-depth due to time or stop command (after depth ' +
+                    currentDepth +
+                    ')'
             )
-            break // Exit if stopped during the current depth search
+            break
         }
 
         if (currentDepthBestMoves.length > 0) {
-            bestMoveOverall = currentDepthBestMoves[0] // Always store the best move from the *current* completed depth
-            console.log(
-                `info depth ${currentDepth} score cp ${Math.round(
-                    bestMoveOverall.score * 100
-                )} nodes ${0} nps ${0} time ${Date.now() - startTime} pv ${
-                    bestMoveOverall.move
+            bestMoveOverall = currentDepthBestMoves[0]
+
+            const timeElapsed = Date.now() - startTime
+            const nps =
+                timeElapsed > 0
+                    ? Math.floor(nodesSearched / (timeElapsed / 1000))
+                    : 0
+
+            let scoreString = ''
+
+            // --- Determine UCI score format (mate or cp) ---
+            if (
+                Math.abs(bestMoveOverall.score) >=
+                CHECKMATE_SCORE - (currentDepth + 1)
+            ) {
+                let movesToMate: number
+                if (bestMoveOverall.score > 0) {
+                    movesToMate = CHECKMATE_SCORE - bestMoveOverall.score
+                } else {
+                    movesToMate =
+                        Math.abs(bestMoveOverall.score) - CHECKMATE_SCORE
+                }
+                scoreString = `score mate ${
+                    bestMoveOverall.score > 0 ? movesToMate : movesToMate
                 }`
+            } else if (
+                bestMoveOverall.score === 0 &&
+                (chess.isStalemate() || chess.isDraw())
+            ) {
+                scoreString = `score cp 0`
+            } else {
+                scoreString = `score cp ${Math.round(
+                    bestMoveOverall.score * 100
+                )}`
+            }
+
+            console.log(
+                `info depth ${currentDepth} ${scoreString} nodes ${nodesSearched} nps ${nps} time ${timeElapsed} pv ${bestMoveOverall.move}`
             )
+
+            if (
+                Math.abs(bestMoveOverall.score) >=
+                CHECKMATE_SCORE - (currentDepth + 1)
+            ) {
+                break
+            }
         } else {
-            // No moves found at this depth (e.g., checkmate/stalemate at depth 0)
+            if (chess.isCheckmate() || chess.isStalemate() || chess.isDraw()) {
+                let finalScoreString = ''
+                if (chess.isCheckmate()) {
+                    finalScoreString = `score mate ${
+                        chess.turn() === 'w' ? -0 : 0
+                    }`
+                } else if (chess.isStalemate() || chess.isDraw()) {
+                    finalScoreString = `score cp 0`
+                }
+                console.log(
+                    `info depth ${currentDepth} ${finalScoreString} nodes 0 nps 0 time 0 pv (none)`
+                )
+            }
             break
         }
     }
@@ -150,7 +254,6 @@ const searchBestMove = async (maxDepth: number, maxTimeMs: number) => {
     if (bestMoveOverall) {
         console.log(`bestmove ${bestMoveOverall.move}`)
     } else {
-        // Fallback if no moves could be found (e.g., immediate checkmate/stalemate)
         const moves = chess.moves({ verbose: true })
         if (moves.length > 0) {
             const move = moves[Math.floor(Math.random() * moves.length)]
@@ -249,7 +352,22 @@ const minimax = async (
 
     await new Promise((resolve) => setImmediate(resolve))
 
-    if (depth === 0 || chess.isCheckmate() || chess.isStalemate()) {
+    if (chess.isCheckmate()) {
+        return {
+            score: chess.turn() === 'b' ? CHECKMATE_SCORE : -CHECKMATE_SCORE,
+            alpha: alpha,
+            beta: beta
+        }
+    }
+    if (chess.isStalemate() || chess.isDraw()) {
+        return {
+            score: 0,
+            alpha: alpha,
+            beta: beta
+        }
+    }
+    if (depth === 0) {
+        nodesSearched++
         return {
             score: evaluateBoard(chess),
             alpha: alpha,
@@ -260,6 +378,7 @@ const minimax = async (
         let setBeta = beta
 
         let bestScore = chess.turn() === 'w' ? -Infinity : Infinity
+        let bestMoveForThisNode: string | null = null
 
         let legalMoves = chess.moves({ verbose: true })
         legalMoves = legalMoves.sort(
@@ -276,36 +395,57 @@ const minimax = async (
             }
 
             chess.move(move)
-
-            let minimaxoutput = await minimax(
+            const childResult = await minimax(
                 chess,
                 depth - 1,
                 setAlpha,
                 setBeta,
                 startTime,
-                maxTimeMs // Pass them down the recursion
+                maxTimeMs
             )
             chess.undo()
 
-            let score = minimaxoutput.score
+            let score = childResult.score
+
+            if (Math.abs(score) >= CHECKMATE_SCORE - (depth + 1)) {
+                // Check if it's a mate score
+                if (score > 0) {
+                    // White's mate found (positive score)
+                    score-- // Mate is one ply further away for White
+                } else {
+                    // Black's mate found (negative score)
+                    score++ // Mate is one ply further away for Black (less negative)
+                }
+            }
 
             if (chess.turn() === 'w') {
-                bestScore = Math.max(bestScore, score)
-                setAlpha = Math.max(score, setAlpha)
+                // Maximizing player (White)
+                if (score > bestScore) {
+                    bestScore = score
+                    bestMoveForThisNode =
+                        move.from + move.to + (move.promotion || '')
+                }
+                setAlpha = Math.max(setAlpha, score)
             } else {
-                bestScore = Math.min(bestScore, score)
-                setBeta = Math.min(score, setBeta)
+                // Minimizing player (Black)
+                if (score < bestScore) {
+                    bestScore = score
+                    bestMoveForThisNode =
+                        move.from + move.to + (move.promotion || '')
+                }
+                setBeta = Math.min(setBeta, score)
             }
 
             if (setAlpha >= setBeta) {
-                break // Alpha-beta cutoff
+                break
             }
         }
 
         return {
             score: bestScore,
             alpha: setAlpha,
-            beta: setBeta
+            beta: setBeta,
+            bestMove: bestMoveForThisNode
         }
     }
 }
